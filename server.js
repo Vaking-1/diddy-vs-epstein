@@ -128,7 +128,12 @@ wss.on('connection', (ws) => {
         x: msg.x, y: msg.y,
         angle: msg.angle,
         vx: msg.vx, vy: msg.vy,
-        c1: msg.c1, c2: msg.c2
+        c1: msg.c1, c2: msg.c2,
+        model: msg.model ?? 0,
+        decal: msg.decal ?? 0,
+        wheelStyle: msg.wheelStyle ?? 0,
+        team: msg.team ?? 0,
+        name: msg.name ?? 'Joueur'
       });
     }
 
