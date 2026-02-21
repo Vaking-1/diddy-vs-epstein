@@ -1076,9 +1076,11 @@ function updateGame(dt){
   const g=game;
   const {FX,FY,FW,FH,GW,GH}=g;
   if(g.gFlash>0)g.gFlash-=dt;
-  g.timeLeft-=dt;
-  if(g.timeLeft<=0){g.timeLeft=0;endGame();return;}
-  // Update HUD seulement chaque seconde
+  // Seul l'hôte (ou solo) gère le timer de fin
+  if(!multiMode || isHost){
+    g.timeLeft-=dt;
+    if(g.timeLeft<=0){g.timeLeft=0;endGame();return;}
+  }
   if(!g._lastHUDSec||Math.ceil(g.timeLeft)!==g._lastHUDSec){g._lastHUDSec=Math.ceil(g.timeLeft);updateTimerHUD();}
 
   const p=g.player;
@@ -1165,23 +1167,29 @@ function updateGame(dt){
     ballCollide(bot,g.ball);
   });
 
-  // Collision joueur-ballon
-  ballCollide(p, g.ball);
+  // Collision joueur-ballon : uniquement hôte ou solo
+  // Le non-hôte envoie juste sa position, l'hôte calcule les collisions pour tout le monde
+  if(!multiMode || isHost) ballCollide(p, g.ball);
 
   // Collision joueurs distants avec ballon (hôte seulement)
-  if(multiMode) collideRemotePlayersWithBall();
+  if(multiMode && isHost) collideRemotePlayersWithBall();
 
   // Player-bot collisions (solo seulement)
   if(!multiMode) g.bots.forEach(bot=>{carCarCollide(p,bot);});
   // Bot-bot collisions
   for(let i=0;i<g.bots.length;i++)for(let j=i+1;j<g.bots.length;j++)carCarCollide(g.bots[i],g.bots[j]);
 
-  // Ball - seulement l'hôte gère la physique complète du ballon
+  // Ball - seulement l'hôte (ou solo) gère la physique balle
   if(multiMode&&!isHost){
-    // Non-host: le ballon est mis à jour par le serveur via BALL_UPDATE
-    // On met juste à jour le spin visuel
-    const b2=g.ball;
-    b2.spin+=Math.sqrt(b2.vx*b2.vx+b2.vy*b2.vy)*dt*.09;
+    // Non-hôte : la balle vient entièrement du serveur via BALL_UPDATE
+    // On applique directement la dernière position reçue
+    if(g.ball._sx !== undefined){
+      g.ball.x = g.ball._sx;
+      g.ball.y = g.ball._sy;
+      g.ball.vx = g.ball._svx;
+      g.ball.vy = g.ball._svy;
+    }
+    g.ball.spin += Math.sqrt(g.ball.vx*g.ball.vx+g.ball.vy*g.ball.vy)*dt*.09;
     updParticles(g.particles,g.theme.particles,g.W,g.H,g.FX,g.FY,g.FW,g.FH,dt);
     return;
   }
@@ -1204,12 +1212,10 @@ function updateGame(dt){
   });
   if(b.x-b.r<FX){
     if(b.y>gY1&&b.y<gY2){
-      if(multiMode&&isHost&&socket){
-        // En multi : l'hôte envoie au serveur, qui rebroadcast le GOAL à tous (y compris l'hôte)
-        // Le score et le reset seront gérés dans handleServerMsg → pas de double-reset
-        socket.send(JSON.stringify({type:'GOAL',team:1}));
-        resetBall(g); // reset balle immédiatement côté hôte pour éviter multi-détection
-      } else if(!multiMode){
+      if(multiMode){
+        resetBall(g);
+        if(socket&&socket.readyState===WebSocket.OPEN) socket.send(JSON.stringify({type:'GOAL',team:1}));
+      } else {
         g.scoreB++;document.getElementById('score-bot').textContent=g.scoreB;
         showGoal('BOT GOAL!','var(--red)');
         startGoalReset(g);
@@ -1219,10 +1225,10 @@ function updateGame(dt){
   }
   if(b.x+b.r>FX+FW){
     if(b.y>gY1&&b.y<gY2){
-      if(multiMode&&isHost&&socket){
-        socket.send(JSON.stringify({type:'GOAL',team:0}));
+      if(multiMode){
         resetBall(g);
-      } else if(!multiMode){
+        if(socket&&socket.readyState===WebSocket.OPEN) socket.send(JSON.stringify({type:'GOAL',team:0}));
+      } else {
         g.scoreP++;document.getElementById('score-player').textContent=g.scoreP;
         showGoal('BUT !','var(--accent)');
         startGoalReset(g);
@@ -1239,6 +1245,7 @@ function ballCollide(car,ball){
   const md=ball.r+Math.max(car.w,car.h)*.46;
   if(dist<md){
     const nx=dx/dist,ny=dy/dist;
+    // car.vx/vy sont en px/sec, ball.vx/vy en unités/frame (×60) → convertir en même unité
     const cvx=(car.vx||0)/60,cvy=(car.vy||0)/60;
     const rvx=ball.vx-cvx,rvy=ball.vy-cvy;
     const dot=rvx*nx+rvy*ny;
@@ -1463,45 +1470,34 @@ function renderGame(){
 
 function drawGameCar(ctx,car,c1,c2,wSpin,isPlayer){
   const {x,y,w,h,angle}=car;
-  // isPlayer → S.car.model ; joueur distant → car.model transmis par le réseau
-  const model = isPlayer ? S.car.model : (car.model ?? 0);
-  // Le style de roue est géré dans chaque drawXxx via isPlayer ou car.wheelStyle
+  const model=isPlayer?S.car.model:(car.model??0);
+  const ws=isPlayer?S.car.wheel:(car.wheelStyle??0);
   ctx.save();ctx.translate(x,y);ctx.rotate(angle);
-  // Shadow
   ctx.globalAlpha=.28;ctx.beginPath();ctx.ellipse(0,h*.56,w*.45,h*.12,0,0,Math.PI*2);ctx.fillStyle='#000';ctx.fill();ctx.globalAlpha=1;
-  if(model===0) drawOctane(ctx,w,h,c1,c2,wSpin,isPlayer,car.wheelStyle);
-  else if(model===1) drawFennec(ctx,w,h,c1,c2,wSpin,isPlayer,car.wheelStyle);
-  else drawDominus(ctx,w,h,c1,c2,wSpin,isPlayer,car.wheelStyle);
+  if(model===0) drawOctane(ctx,w,h,c1,c2,wSpin,ws);
+  else if(model===1) drawFennec(ctx,w,h,c1,c2,wSpin,ws);
+  else drawDominus(ctx,w,h,c1,c2,wSpin,ws);
   ctx.restore();
 }
 
 // OCTANE - muscle car compact, toit arrondi
-function drawOctane(ctx,w,h,c1,c2,wSpin,isPlayer,remoteWheelStyle){
-  const wst = isPlayer ? S.car.wheel : (remoteWheelStyle ?? 0);
+function drawOctane(ctx,w,h,c1,c2,wSpin,ws){
   ctx.fillStyle=c1;
   ctx.beginPath();ctx.moveTo(-w*.48,-h*.1);ctx.lineTo(w*.48,-h*.18);ctx.lineTo(w*.5,h*.32);ctx.lineTo(-w*.5,h*.32);ctx.closePath();ctx.fill();
-  // Toit rond bombé
   ctx.fillStyle=shade(c1,20);
   ctx.beginPath();ctx.moveTo(-w*.25,-h*.1);ctx.quadraticCurveTo(-w*.1,-h*.48,w*.1,-h*.44);ctx.lineTo(w*.28,-h*.18);ctx.lineTo(w*.28,-h*.08);ctx.lineTo(-w*.25,-h*.08);ctx.closePath();ctx.fill();
-  // Pare-brise arrondi
   ctx.fillStyle='rgba(160,220,255,.82)';
   ctx.beginPath();ctx.moveTo(-w*.22,-h*.09);ctx.quadraticCurveTo(-w*.08,-h*.42,w*.08,-h*.38);ctx.lineTo(w*.25,-h*.17);ctx.lineTo(w*.25,-h*.08);ctx.lineTo(-w*.22,-h*.09);ctx.closePath();ctx.fill();
-  // Stripe latérale
   ctx.fillStyle=c2;ctx.fillRect(-w*.46,h*.08,w*.92,h*.08);
-  // Prise d'air sur le capot
   ctx.fillStyle=shade(c1,-25);ctx.fillRect(w*.15,-h*.12,w*.2,h*.06);
-  // Phares
   ctx.fillStyle='rgba(255,240,120,.95)';ctx.beginPath();ctx.ellipse(w*.44,h*.06,w*.04,h*.08,0,0,Math.PI*2);ctx.fill();
   ctx.fillStyle='rgba(255,60,60,.88)';ctx.beginPath();ctx.ellipse(-w*.44,h*.06,w*.04,h*.08,0,0,Math.PI*2);ctx.fill();
-  // Roues
   const wr=h*.24;
-  drawWheel(ctx,-w*.32,h*.38,wr,wst,c2,wSpin);drawWheel(ctx,w*.32,h*.38,wr,wst,c2,wSpin);
+  drawWheel(ctx,-w*.32,h*.38,wr,ws,c2,wSpin);drawWheel(ctx,w*.32,h*.38,wr,ws,c2,wSpin);
 }
 
 // FENNEC - voiture ronde et compacte, style kart
-function drawFennec(ctx,w,h,c1,c2,wSpin,isPlayer,remoteWheelStyle){
-  const wst = isPlayer ? S.car.wheel : (remoteWheelStyle ?? 0);
-  // Carrosserie très arrondie
+function drawFennec(ctx,w,h,c1,c2,wSpin,ws){
   ctx.fillStyle=c1;
   ctx.beginPath();
   ctx.moveTo(-w*.38,h*.32);ctx.lineTo(w*.38,h*.32);
@@ -1511,51 +1507,37 @@ function drawFennec(ctx,w,h,c1,c2,wSpin,isPlayer,remoteWheelStyle){
   ctx.quadraticCurveTo(-w*.45,-h*.38,-w*.5,h*.0);
   ctx.quadraticCurveTo(-w*.52,h*.25,-w*.38,h*.32);
   ctx.closePath();ctx.fill();
-  // Highlight haut
   const hlf=ctx.createRadialGradient(-w*.1,-h*.3,0,0,-h*.1,w*.45);
   hlf.addColorStop(0,'rgba(255,255,255,.35)');hlf.addColorStop(1,'rgba(255,255,255,0)');
   ctx.fillStyle=hlf;ctx.beginPath();ctx.ellipse(-w*.05,-h*.18,w*.38,h*.28,-.15,0,Math.PI*2);ctx.fill();
-  // Grande vitre panoramique
   ctx.fillStyle='rgba(140,210,255,.78)';
   ctx.beginPath();ctx.ellipse(0,-h*.18,w*.28,h*.22,0,0,Math.PI*2);ctx.fill();
-  // Bande colorée
   ctx.fillStyle=c2;
   ctx.beginPath();ctx.moveTo(-w*.48,h*.06);ctx.lineTo(w*.48,h*.06);ctx.lineTo(w*.46,h*.14);ctx.lineTo(-w*.46,h*.14);ctx.closePath();ctx.fill();
-  // Phares ronds
   ctx.fillStyle='rgba(255,250,150,.95)';ctx.beginPath();ctx.arc(w*.42,h*.05,w*.06,0,Math.PI*2);ctx.fill();
   ctx.fillStyle='rgba(255,50,50,.88)';ctx.beginPath();ctx.arc(-w*.42,h*.05,w*.06,0,Math.PI*2);ctx.fill();
-  // Roues larges
   const wr=h*.27;
-  drawWheel(ctx,-w*.34,h*.36,wr,wst,c2,wSpin);drawWheel(ctx,w*.34,h*.36,wr,wst,c2,wSpin);
+  drawWheel(ctx,-w*.34,h*.36,wr,ws,c2,wSpin);drawWheel(ctx,w*.34,h*.36,wr,ws,c2,wSpin);
 }
 
 // DOMINUS - voiture plate et longue, style F1/supercar
-function drawDominus(ctx,w,h,c1,c2,wSpin,isPlayer,remoteWheelStyle){
-  const wst = isPlayer ? S.car.wheel : (remoteWheelStyle ?? 0);
-  // Carrosserie très plate et allongée
+function drawDominus(ctx,w,h,c1,c2,wSpin,ws){
   ctx.fillStyle=c1;
   ctx.beginPath();ctx.moveTo(-w*.5,h*.28);ctx.lineTo(w*.5,h*.22);ctx.lineTo(w*.52,-h*.02);ctx.lineTo(w*.35,-h*.08);ctx.lineTo(-w*.1,-h*.28);ctx.lineTo(-w*.42,-h*.12);ctx.lineTo(-w*.52,h*.02);ctx.closePath();ctx.fill();
-  // Capot plongeant bas
   ctx.fillStyle=shade(c1,15);
   ctx.beginPath();ctx.moveTo(w*.52,-h*.02);ctx.lineTo(w*.35,-h*.08);ctx.lineTo(w*.2,-h*.05);ctx.lineTo(w*.48,h*.04);ctx.closePath();ctx.fill();
-  // Cockpit plat
   ctx.fillStyle=shade(c1,22);
   ctx.beginPath();ctx.moveTo(-w*.08,-h*.28);ctx.lineTo(w*.18,-h*.22);ctx.lineTo(w*.22,-h*.08);ctx.lineTo(-w*.12,-h*.08);ctx.closePath();ctx.fill();
-  // Vitre très basse
   ctx.fillStyle='rgba(120,200,255,.75)';
   ctx.beginPath();ctx.moveTo(-w*.05,-h*.25);ctx.lineTo(w*.16,-h*.2);ctx.lineTo(w*.18,-h*.1);ctx.lineTo(-w*.08,-h*.1);ctx.closePath();ctx.fill();
-  // Double bande racing
   ctx.fillStyle=c2;ctx.fillRect(-w*.5,h*.04,w,h*.055);
   ctx.globalAlpha=.6;ctx.fillRect(-w*.5,h*.12,w,h*.03);ctx.globalAlpha=1;
-  // Aileron arrière
   ctx.fillStyle=shade(c2,-10);ctx.fillRect(-w*.5,-h*.08,w*.08,h*.04);
   ctx.fillRect(-w*.5,-h*.14,w*.06,h*.06);
-  // Phares fins
   ctx.fillStyle='rgba(255,245,100,.95)';ctx.fillRect(w*.44,-h*.01,w*.08,h*.05);
   ctx.fillStyle='rgba(255,40,40,.9)';ctx.fillRect(-w*.52,-h*.01,w*.08,h*.05);
-  // Roues fines
   const wr=h*.2;
-  drawWheel(ctx,-w*.3,h*.35,wr,wst,c2,wSpin);drawWheel(ctx,w*.35,h*.35,wr,wst,c2,wSpin);
+  drawWheel(ctx,-w*.3,h*.35,wr,ws,c2,wSpin);drawWheel(ctx,w*.35,h*.35,wr,ws,c2,wSpin);
 }
 
 function showGoal(txt,color){
@@ -1586,14 +1568,19 @@ function gameLoop(ts){
   if(!game||!game.running||game.paused)return;
   const dt=Math.min((ts-game.lastTime)/1000,.05);
   game.lastTime=ts;updateGame(dt);renderGame();
-  // Sync multijoueur ~20 fois/sec
   if(multiMode){
-    if(!game._lastSend||ts-game._lastSend>50){
+    // Position joueur ~20fps
+    if(!game._lastPos||ts-game._lastPos>50){
       sendPlayerUpdate();
-      if(isHost&&socket&&socket.readyState===WebSocket.OPEN){
-        socket.send(JSON.stringify({type:'BALL_UPDATE',ball:{x:game.ball.x,y:game.ball.y,vx:game.ball.vx,vy:game.ball.vy}}));
-      }
-      game._lastSend=ts;
+      game._lastPos=ts;
+    }
+    // Balle : hôte envoie à chaque frame pour fluidité max + timer sync
+    if(isHost&&socket&&socket.readyState===WebSocket.OPEN){
+      socket.send(JSON.stringify({
+        type:'BALL_UPDATE',
+        ball:{x:game.ball.x,y:game.ball.y,vx:game.ball.vx,vy:game.ball.vy},
+        timeLeft:game.timeLeft
+      }));
     }
   }
   game.animFrame=requestAnimationFrame(gameLoop);
@@ -1717,10 +1704,12 @@ function handleServerMsg(msg) {
 
   if (msg.type === 'BALL_UPDATE') {
     if (game && !isHost) {
-      game.ball.x = msg.ball.x;
-      game.ball.y = msg.ball.y;
-      game.ball.vx = msg.ball.vx;
-      game.ball.vy = msg.ball.vy;
+      game.ball._sx = msg.ball.x;
+      game.ball._sy = msg.ball.y;
+      game.ball._svx = msg.ball.vx;
+      game.ball._svy = msg.ball.vy;
+      // Sync timer depuis l'hôte
+      if (msg.timeLeft !== undefined) game.timeLeft = msg.timeLeft;
     }
   }
 
@@ -1731,7 +1720,6 @@ function handleServerMsg(msg) {
       document.getElementById('score-player').textContent = msg.scoreA;
       document.getElementById('score-bot').textContent = msg.scoreB;
       showGoal(msg.team === 0 ? 'BUT ! 🎉' : 'ADVERSAIRE !', msg.team === 0 ? 'var(--accent)' : 'var(--red)');
-      // Tous les joueurs (hôte ET non-hôte) doivent reset après un but
       startGoalReset(game);
     }
   }
@@ -1815,19 +1803,15 @@ function drawRemotePlayers(ctx) {
     if (!rp || rp.x === undefined) return;
     const c1 = rp.c1 || (rp.team === 1 ? '#cc2200' : '#00b4ff');
     const c2 = rp.c2 || '#ffffff';
-    // Spin de roue propre à chaque joueur distant
     if (rp._wSpin === undefined) rp._wSpin = 0;
-    const spd = Math.sqrt((rp.vx||0)**2 + (rp.vy||0)**2);
-    rp._wSpin += spd * 0.0008;
-    const carObj = {
+    rp._wSpin += Math.sqrt((rp.vx||0)**2+(rp.vy||0)**2)*0.0008;
+    drawGameCar(ctx, {
       x: rp.x, y: rp.y, angle: rp.angle || 0,
       w: game.CW, h: game.CH,
-      trail: [], vx: rp.vx || 0, vy: rp.vy || 0,
+      trail: [], vx: rp.vx||0, vy: rp.vy||0,
       model: rp.model ?? 0,
       wheelStyle: rp.wheelStyle ?? 0,
-    };
-    drawGameCar(ctx, carObj, c1, c2, rp._wSpin, false);
-    // Nametag au-dessus du joueur
+    }, c1, c2, rp._wSpin, false);
     if (rp.name) {
       ctx.save();
       ctx.font = 'bold 11px Rajdhani, sans-serif';
@@ -1843,12 +1827,10 @@ function drawRemotePlayers(ctx) {
 }
 
 // Collision ballon avec joueurs distants (côté hôte seulement)
-// Les vx/vy reçus du réseau sont en px/sec (identique à game.player.vx)
 function collideRemotePlayersWithBall() {
   if (!isHost) return;
   Object.values(remotePlayers).forEach(rp => {
     if (!rp || rp.x === undefined) return;
-    // ballCollide divise vx/vy par 60 → on passe telles quelles (px/sec)
     const fakecar = {x: rp.x, y: rp.y, vx: (rp.vx||0), vy: (rp.vy||0), w: game.CW, h: game.CH};
     ballCollide(fakecar, game.ball);
   });
