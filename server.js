@@ -21,11 +21,11 @@ const FIELD_Y1 = 0.14, FIELD_Y2 = 0.78;
 const FIELD_CX = (FIELD_X1 + FIELD_X2) / 2;
 const FIELD_CY = (FIELD_Y1 + FIELD_Y2) / 2;
 
-const GOAL_H   = 0.30;   // hauteur but normalisée
-const BALL_R   = 0.028;
+const GOAL_H   = 0.1920; // GH = FH*0.3 = H*0.64*0.3 — correspond exactement au client
+const BALL_R   = 0.022; // rayon de détection — en fraction de W (pour x) et H (pour y)
 const CAR_W    = 0.085;
 const CAR_H    = 0.055;
-const CAR_R    = Math.max(CAR_W, CAR_H) * 0.50; // rayon collision voiture
+const CAR_R    = Math.max(CAR_W, CAR_H) * 0.44; // rayon collision voiture
 const SPD      = 0.32;   // vitesse max normalisée/s
 const BOOST_MUL= 1.9;
 const FRIC_PS  = 0.80;   // friction par seconde
@@ -33,8 +33,9 @@ const BNC      = 0.65;   // rebond balle
 const TICK_MS  = 1000 / 60;
 const dt       = TICK_MS / 1000;
 
-const GY1 = FIELD_CY - GOAL_H / 2;
-const GY2 = FIELD_CY + GOAL_H / 2;
+// GY1/GY2 = position cage en fraction de H (identique au client)
+const GY1 = 0.3640; // = FY + FH/2 - GH/2
+const GY2 = 0.5560; // = FY + FH/2 + GH/2
 
 const rooms = {};
 
