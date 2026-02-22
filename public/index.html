@@ -1296,7 +1296,11 @@ function startGoalReset(g){
   cancelAnimationFrame(g.animFrame);
   resetPositions(g);
   g._goalPending = false; // autorise la prochaine détection de but
-  if(multiMode) sendPlayerUpdate(); // envoie position reset immédiatement
+  // Rendre le jeu visible pendant le countdown (renderGame sans physics)
+  if(multiMode){
+    sendPlayerUpdate();
+    renderGame(); // affiche positions resetées
+  }
   const el=document.getElementById('goal-countdown');
   const num=document.getElementById('gc-num');
   el.classList.add('show');
@@ -1574,13 +1578,21 @@ function gameLoop(ts){
       sendPlayerUpdate();
       game._lastPos=ts;
     }
-    // Balle : hôte envoie à chaque frame pour fluidité max + timer sync
+    // Balle : hôte envoie à 20fps max, coordonnées normalisées
     if(isHost&&socket&&socket.readyState===WebSocket.OPEN){
-      socket.send(JSON.stringify({
-        type:'BALL_UPDATE',
-        ball:{x:game.ball.x,y:game.ball.y,vx:game.ball.vx,vy:game.ball.vy},
-        timeLeft:game.timeLeft
-      }));
+      if(!game._lastBall||ts-game._lastBall>50){
+        socket.send(JSON.stringify({
+          type:'BALL_UPDATE',
+          ball:{
+            nx:(game.ball.x-game.FX)/game.FW,
+            ny:(game.ball.y-game.FY)/game.FH,
+            nvx:game.ball.vx/game.FW,
+            nvy:game.ball.vy/game.FH
+          },
+          timeLeft:game.timeLeft
+        }));
+        game._lastBall=ts;
+      }
     }
   }
   game.animFrame=requestAnimationFrame(gameLoop);
@@ -1704,17 +1716,17 @@ function handleServerMsg(msg) {
   }
 
   if (msg.type === 'PLAYER_UPDATE') {
-    if (msg.id === myPlayerId) return; // ignore notre propre position
-    remotePlayers[msg.id] = msg;
+    if (msg.id && msg.id === myPlayerId) return; // ignore notre propre position
+    if (msg.id) remotePlayers[msg.id] = msg;
   }
 
   if (msg.type === 'BALL_UPDATE') {
     if (game && !isHost) {
-      game.ball._sx  = msg.ball.x;
-      game.ball._sy  = msg.ball.y;
-      game.ball._svx = msg.ball.vx;
-      game.ball._svy = msg.ball.vy;
-      // Sync timer: seulement si écart > 1s pour éviter les sauts visuels
+      // Dénormaliser la balle selon le terrain LOCAL
+      game.ball._sx  = game.FX + msg.ball.nx * game.FW;
+      game.ball._sy  = game.FY + msg.ball.ny * game.FH;
+      game.ball._svx = msg.ball.nvx * game.FW;
+      game.ball._svy = msg.ball.nvy * game.FH;
       if (msg.timeLeft !== undefined && Math.abs(game.timeLeft - msg.timeLeft) > 1) {
         game.timeLeft = msg.timeLeft;
       }
@@ -1798,11 +1810,15 @@ function selectSrvTimeAndSync(s) {
 // Envoi position pendant la partie
 function sendPlayerUpdate() {
   if (!socket || !game || socket.readyState !== WebSocket.OPEN) return;
+  // Coordonnées NORMALISÉES (0→1) par rapport au terrain pour être indépendant de la résolution
+  const nx = (game.player.x - game.FX) / game.FW;
+  const ny = (game.player.y - game.FY) / game.FH;
+  const nvx = game.player.vx / game.FW;
+  const nvy = game.player.vy / game.FH;
   socket.send(JSON.stringify({
     type: 'PLAYER_UPDATE',
-    x: game.player.x, y: game.player.y,
+    nx, ny, nvx, nvy,
     angle: game.player.angle,
-    vx: game.player.vx, vy: game.player.vy,
     c1: S.car.c1, c2: S.car.c2,
     model: S.car.model,
     decal: S.car.decal,
@@ -1815,15 +1831,20 @@ function sendPlayerUpdate() {
 function drawRemotePlayers(ctx) {
   if(!game) return;
   Object.values(remotePlayers).forEach((rp) => {
-    if (!rp || rp.x === undefined) return;
+    if (!rp || rp.nx === undefined) return;
+    // Dénormaliser: coordonnées relatives au terrain LOCAL
+    const rx = game.FX + rp.nx * game.FW;
+    const ry = game.FY + rp.ny * game.FH;
+    const rvx = (rp.nvx||0) * game.FW;
+    const rvy = (rp.nvy||0) * game.FH;
     const c1 = rp.c1 || (rp.team === 1 ? '#cc2200' : '#00b4ff');
     const c2 = rp.c2 || '#ffffff';
     if (rp._wSpin === undefined) rp._wSpin = 0;
-    rp._wSpin += Math.sqrt((rp.vx||0)**2+(rp.vy||0)**2)*0.0008;
+    rp._wSpin += Math.sqrt(rvx**2+rvy**2)*0.0008;
     drawGameCar(ctx, {
-      x: rp.x, y: rp.y, angle: rp.angle || 0,
+      x: rx, y: ry, angle: rp.angle || 0,
       w: game.CW, h: game.CH,
-      trail: [], vx: rp.vx||0, vy: rp.vy||0,
+      trail: [], vx: rvx, vy: rvy,
       model: rp.model ?? 0,
       wheelStyle: rp.wheelStyle ?? 0,
     }, c1, c2, rp._wSpin, false);
@@ -1833,9 +1854,9 @@ function drawRemotePlayers(ctx) {
       ctx.textAlign = 'center';
       const tw = ctx.measureText(rp.name).width;
       ctx.fillStyle = rp.team === 1 ? 'rgba(200,40,0,.75)' : 'rgba(0,100,200,.75)';
-      ctx.fillRect(rp.x - tw/2 - 4, rp.y - game.CH*.85 - 16, tw + 8, 16);
+      ctx.fillRect(rx - tw/2 - 4, ry - game.CH*.85 - 16, tw + 8, 16);
       ctx.fillStyle = '#fff';
-      ctx.fillText(rp.name, rp.x, rp.y - game.CH*.85 - 4);
+      ctx.fillText(rp.name, rx, ry - game.CH*.85 - 4);
       ctx.restore();
     }
   });
@@ -1843,10 +1864,14 @@ function drawRemotePlayers(ctx) {
 
 // Collision ballon avec joueurs distants (côté hôte seulement)
 function collideRemotePlayersWithBall() {
-  if (!isHost) return;
+  if (!isHost || !game) return;
   Object.values(remotePlayers).forEach(rp => {
-    if (!rp || rp.x === undefined) return;
-    const fakecar = {x: rp.x, y: rp.y, vx: (rp.vx||0), vy: (rp.vy||0), w: game.CW, h: game.CH};
+    if (!rp || rp.nx === undefined) return;
+    const rx = game.FX + rp.nx * game.FW;
+    const ry = game.FY + rp.ny * game.FH;
+    const rvx = (rp.nvx||0) * game.FW;
+    const rvy = (rp.nvy||0) * game.FH;
+    const fakecar = {x: rx, y: ry, vx: rvx, vy: rvy, w: game.CW, h: game.CH};
     ballCollide(fakecar, game.ball);
   });
 }
