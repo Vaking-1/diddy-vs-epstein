@@ -21,20 +21,24 @@ const FIELD_Y1 = 0.14, FIELD_Y2 = 0.78;
 const FIELD_CX = (FIELD_X1 + FIELD_X2) / 2;
 const FIELD_CY = (FIELD_Y1 + FIELD_Y2) / 2;
 
-const GOAL_H   = 0.30;   // hauteur but normalisée
-const BALL_R   = 0.028;
+// Cage: valeurs EXACTES du client
+// Client: FH=H*0.64, GH=FH*0.3=H*0.192
+// gY1 = H*0.14 + H*0.32 - H*0.096 = H*0.364
+// gY2 = H*0.556
+// Le serveur stocke y en fraction de H → GY1=0.364, GY2=0.556
+const GY1 = 0.364;
+const GY2 = 0.556;
+
+const BALL_R   = 0.022;  // fraction de W (cohérent avec BR=min(W,H)*0.028 sur 16:9)
 const CAR_W    = 0.085;
 const CAR_H    = 0.055;
-const CAR_R    = Math.max(CAR_W, CAR_H) * 0.50; // rayon collision voiture
-const SPD      = 0.32;   // vitesse max normalisée/s
-const BOOST_MUL= 1.9;
-const FRIC_PS  = 0.80;   // friction par seconde
-const BNC      = 0.65;   // rebond balle
+const CAR_R    = 0.040;  // rayon collision voiture
+const SPD      = 0.28;   // vitesse max (unités/s)
+const BOOST_MUL= 1.85;
+const FRIC_PS  = 0.82;
+const BNC      = 0.62;
 const TICK_MS  = 1000 / 60;
-const dt       = TICK_MS / 1000;
-
-const GY1 = FIELD_CY - GOAL_H / 2;
-const GY2 = FIELD_CY + GOAL_H / 2;
+const MAX_DT   = 1 / 30; // plafond dt anti-tunneling
 
 const rooms = {};
 
@@ -95,15 +99,14 @@ function carCollide(a, b) {
   const minD = CAR_R * 2;
   if (dist >= minD) return;
   const nx = dx / dist, ny = dy / dist;
-  // Dépénétration douce — chaque voiture se déplace de la moitié
+  // Dépénétration douce — pas d'éjection violente
   const overlap = (minD - dist) * 0.5;
   a.x -= nx * overlap; a.y -= ny * overlap;
   b.x += nx * overlap; b.y += ny * overlap;
-  // Très léger échange de vitesse — juste assez pour éviter superposition
-  // Sans éjection agressive
+  // Échange de vitesse minime — juste pour éviter la superposition
   const dot = (a.vx - b.vx) * nx + (a.vy - b.vy) * ny;
   if (dot > 0) {
-    const k = 0.15;
+    const k = 0.10;
     a.vx -= k * dot * nx; a.vy -= k * dot * ny;
     b.vx += k * dot * nx; b.vy += k * dot * ny;
   }
@@ -118,20 +121,25 @@ function clampPlayer(p) {
 }
 
 function tickRoom(room) {
-  if (!room.started || room.paused) return;
+  if (!room.started || room.paused || room._gameOverSent) return;
+
+  // dt dynamique — évite dérive du timer sur serveurs lents/Render
+  const now = Date.now();
+  const dt = Math.min((now - (room._lastTick || now)) / 1000, MAX_DT);
+  room._lastTick = now;
 
   // ---- Timer ----
   room.timeLeft -= dt;
-  if (room.timeLeft <= 0 && !room._gameOverSent) {
+  if (room.timeLeft <= 0) {
     room.timeLeft = 0;
     room.started = false;
     room._gameOverSent = true;
     clearInterval(room.ticker);
     room.ticker = null;
+    broadcastState(room);
     broadcast(room, { type: 'GAME_OVER', scoreA: room.scoreA, scoreB: room.scoreB });
     return;
   }
-  if (room._gameOverSent) return;
 
   // ---- Joueurs ----
   const players = Object.values(room.players);
@@ -198,15 +206,18 @@ function tickRoom(room) {
 function handleGoal(room, scoringTeam) {
   room.paused = true;
   broadcast(room, { type: 'GOAL', team: scoringTeam, scoreA: room.scoreA, scoreB: room.scoreB });
+  // Reset positions visible rapidement
   setTimeout(() => {
     if (!rooms[room.id]) return;
     resetBall(room); resetPlayers(room); broadcastState(room);
-  }, 200);
+  }, 300);
+  // Reprendre à 5000ms — aligné avec le client: 1800ms BUT + 3200ms countdown
   setTimeout(() => {
     if (!rooms[room.id]) return;
     room.paused = false;
+    room._lastTick = Date.now(); // évite un saut dt après la pause
     broadcastState(room);
-  }, 3600);
+  }, 5000);
 }
 
 function broadcastState(room) {
@@ -243,7 +254,7 @@ wss.on('connection', (ws) => {
         players: {}, ball: createBall(),
         scoreA: 0, scoreB: 0, timeLeft: msg.time ?? 180,
         started: false, paused: false, ticker: null,
-        _gameOverSent: false, _btick: 0
+        _gameOverSent: false, _btick: 0, _lastTick: Date.now()
       };
       rooms[id].players[playerId] = mkPlayer(playerId, ws, msg.name, 0, msg);
       roomId = id;
@@ -269,7 +280,7 @@ wss.on('connection', (ws) => {
       if (!room) return;
       room.started = true; room.timeLeft = room.time;
       room.scoreA = 0; room.scoreB = 0;
-      room._gameOverSent = false; room._btick = 0;
+      room._gameOverSent = false; room._btick = 0; room._lastTick = Date.now();
       resetBall(room); resetPlayers(room);
       broadcast(room, {
         type: 'GAME_START', map: room.map, time: room.time,
